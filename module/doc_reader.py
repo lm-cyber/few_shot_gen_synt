@@ -161,6 +161,52 @@ def extract_from_rtf(filepath):
     }
     return data_from_docx
 
+def put_to_docx(filepath, extracted_data):
+    """
+    Добавляет текст в DOCX.
+    """
+    doc = docx.Document(filepath)
+    texts = extracted_data.get('rephrased_texts', extracted_data.get('texts', []))
+    
+    # Make sure we have texts to add
+    if not texts:
+        print(f"Warning: No texts found in extracted_data for file {filepath}")
+        return doc
+    
+    element_index = 0
+    text_index = 0
+    max_text_index = len(texts) - 1
+    
+    # 1. Основной текст документа (параграфы и таблицы)
+    for element in doc.element.body:
+        if text_index > max_text_index:
+            # No more texts to add
+            break
+            
+        if isinstance(element, docx.oxml.text.paragraph.CT_P): # Параграф
+            para = docx.text.paragraph.Paragraph(element, doc)
+            if para.text.strip():  # Only replace non-empty paragraphs
+                para.text = texts[text_index]
+                text_index += 1
+            
+        elif isinstance(element, docx.oxml.table.CT_Tbl): # Таблица
+            print("Table found, skipping")
+
+    # 2. Верхние и нижние колонтитулы
+    for section in doc.sections:
+        # Верхний колонтитул
+        for para in section.header.paragraphs:
+            if text_index <= max_text_index and para.text.strip():
+                para.text = texts[text_index]
+                text_index += 1
+                
+        # Нижний колонтитул
+        for para in section.footer.paragraphs:
+            if text_index <= max_text_index and para.text.strip():
+                para.text = texts[text_index]
+                text_index += 1
+
+    return doc
 
 # --- Main Extractor ---
 
