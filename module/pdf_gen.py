@@ -91,6 +91,13 @@ def generate_pdf_from_layout_data(
             print(f"2 Предупреждение: Метка ID '{label_id_str}' не найдена в ID2LABEL. "
                   f"Используется стиль по умолчанию для текста: '{text_content[:50]}...'")
 
+        # Clone the style so we can modify it for this specific text block
+        text_style = ParagraphStyle(
+            f'Style_{i}', 
+            parent=current_style_obj,
+            fontSize=current_style_obj.fontSize
+        )
+
         orig_x_min, orig_y_min, orig_x_max, orig_y_max = bbox_coords
 
         scaled_bbox_width = (orig_x_max - orig_x_min) * scale_x
@@ -111,20 +118,39 @@ def generate_pdf_from_layout_data(
                     doc_canvas.restoreState()
                 continue
         
-        paragraph_obj = Paragraph(text_content, current_style_obj)
-
+        # Define padding (internal margins for the frame)
         frame_left_padding = 1
         frame_bottom_padding = 1
         frame_right_padding = 1
         frame_top_padding = 1
         
-        # Область, доступная для текста внутри фрейма, учитывая padding
+        # Calculate available space for text within the frame
         available_width_for_text = scaled_bbox_width - (frame_left_padding + frame_right_padding)
         available_height_for_text = scaled_bbox_height - (frame_top_padding + frame_bottom_padding)
 
-        if available_width_for_text < 1 : available_width_for_text = 1
-        if available_height_for_text < 1 : available_height_for_text = 1
+        if available_width_for_text < 1: available_width_for_text = 1
+        if available_height_for_text < 1: available_height_for_text = 1
+
+        # Prepare text for fitting
+        # If text is too long, add line breaks to help with wrapping
+        if len(text_content) > 50 and " " in text_content:
+            # Add more line breaks for long text to help with wrapping
+            words = text_content.split()
+            text_content = ""
+            line_length = 0
+            max_line_chars = max(10, min(40, int(available_width_for_text / 3)))
+            
+            for word in words:
+                if line_length + len(word) > max_line_chars:
+                    text_content += " " + word + "\n"
+                    line_length = 0
+                else:
+                    text_content += " " + word
+                    line_length += len(word) + 1
+            
+            text_content = text_content.strip()
         
+        # Create frame for the text
         text_frame = Frame(
             x1=frame_x_pdf, y1=frame_y_pdf,
             width=scaled_bbox_width, height=scaled_bbox_height,
@@ -134,54 +160,103 @@ def generate_pdf_from_layout_data(
             id=f'frame_{i}'
         )
         
-        try:
-            # paragraph_obj.canv = doc_canvas # Это делается внутри Frame._add или Frame.drawBoundary
-            # Метод _add ожидает один flowable
-            # Он возвращает 1 если успешно, 0 если flowable не поместился, или кидает исключение
-            # если flowable слишком широк/высок для пустого фрейма
-            
-            # Вызов wrap для получения требуемых размеров и предварительной проверки
-            required_w, required_h = paragraph_obj.wrapOn(doc_canvas, available_width_for_text, available_height_for_text)
-
-            problem_drawing = False
-            if required_w > available_width_for_text + 0.01: # Допуск на float
-                print(f"4 ПРЕДУПРЕЖДЕНИЕ: Текст для элемента {i} ('{text_content[:20]}...') СЛИШКОМ ШИРОК.")
-                print(f"  Требуемая ширина текста: {required_w:.2f}, доступная ширина во фрейме: {available_width_for_text:.2f}")
-                problem_drawing = True
-            
-            if required_h > available_height_for_text + 0.01: # Допуск на float
-                print(f"5 ПРЕДУПРЕЖДЕНИЕ: Текст для элемента {i} ('{text_content[:20]}...') СЛИШКОМ ВЫСОК.")
-                print(f"  Требуемая высота текста: {required_h:.2f}, доступная высота во фрейме: {available_height_for_text:.2f}")
-                problem_drawing = True
-
-            if problem_drawing and debug_draw_bbox_borders:
-                doc_canvas.saveState()
-                doc_canvas.setStrokeColor(orange) # Оранжевая рамка для проблемных по размеру
-                doc_canvas.setFillColor(orange)
-                doc_canvas.setStrokeAlpha(0.7)
-                doc_canvas.setFillAlpha(0.1)
-                doc_canvas.rect(frame_x_pdf, frame_y_pdf, scaled_bbox_width, scaled_bbox_height, fill=1, stroke=1)
-                doc_canvas.restoreState()
-                # Можно решить здесь не рисовать текст, если он гарантированно не поместится
-                # continue
-
-            # Пытаемся добавить текст в любом случае, Frame его обрежет, если он не помещается
-            # но если он был "слишком широк" для пустого фрейма, _add мог бы кинуть исключение
-            if not text_frame._add(paragraph_obj, doc_canvas, trySplit=1):
-                 # Это может случиться, если wrapOn не был точен или есть другие нюансы
-                 print(f"6 ПРЕДУПРЕЖДЕНИЕ: Frame._add сообщил, что текст для элемента {i} ('{text_content[:20]}...') НЕ поместился, даже если wrapOn не показал критических проблем.")
-
-        except Exception as frame_error:
-            print(f"КРИТИЧЕСКАЯ ОШИБКА при обработке/добавлении параграфа в фрейм для элемента {i} "
-                  f"('{text_content[:50]}...'): {frame_error}")
-            if debug_draw_bbox_borders:
-                 doc_canvas.saveState()
-                 doc_canvas.setStrokeColor(red) # Красная рамка для ошибок
-                 doc_canvas.setFillColor(red)
-                 doc_canvas.setStrokeAlpha(0.7)
-                 doc_canvas.setFillAlpha(0.1)
-                 doc_canvas.rect(frame_x_pdf, frame_y_pdf, scaled_bbox_width, scaled_bbox_height, fill=1, stroke=1)
-                 doc_canvas.restoreState()
+        # Try to fit text with automatic font size adaptation
+        success = False
+        min_font_size = 4  # Don't go smaller than this
+        max_attempts = 5   # Limit font size reduction attempts
+        current_attempt = 0
+        
+        while not success and current_attempt < max_attempts:
+            try:
+                # Create paragraph with current style
+                paragraph_obj = Paragraph(text_content, text_style)
+                
+                # Check if text fits with current font size
+                required_w, required_h = paragraph_obj.wrapOn(doc_canvas, available_width_for_text, available_height_for_text)
+                
+                problem_drawing = False
+                if required_w > available_width_for_text + 0.01 or required_h > available_height_for_text + 0.01:
+                    problem_drawing = True
+                    
+                    # If text doesn't fit, reduce font size for next attempt
+                    if text_style.fontSize > min_font_size:
+                        # Reduce font size by 10% or at least 0.5 points
+                        new_font_size = max(min_font_size, text_style.fontSize * 0.9)
+                        new_font_size = max(new_font_size, text_style.fontSize - 0.5)
+                        
+                        if current_attempt == 0:
+                            print(f"Адаптация размера шрифта для элемента {i}, исходный размер: {text_style.fontSize}, "
+                                  f"требуемые размеры: {required_w:.1f}x{required_h:.1f}, "
+                                  f"доступные размеры: {available_width_for_text:.1f}x{available_height_for_text:.1f}")
+                        
+                        text_style.fontSize = new_font_size
+                        # Adjust leading (line height) accordingly
+                        text_style.leading = new_font_size * 1.2
+                        
+                        current_attempt += 1
+                        continue
+                
+                # Try to add the paragraph to the frame
+                success = text_frame._add(paragraph_obj, doc_canvas, trySplit=1)
+                
+                if not success:
+                    # If adding to frame failed despite good size calculation
+                    if text_style.fontSize > min_font_size and current_attempt < max_attempts - 1:
+                        # Try with even smaller font
+                        text_style.fontSize = max(min_font_size, text_style.fontSize * 0.9)
+                        text_style.leading = text_style.fontSize * 1.2
+                        current_attempt += 1
+                    else:
+                        # We've reached minimum font size or max attempts, force placement
+                        doc_canvas.saveState()
+                        doc_canvas.setFont(text_style.fontName, text_style.fontSize)
+                        # Calculate how many lines we can fit
+                        line_height = text_style.leading
+                        max_lines = int(available_height_for_text / line_height)
+                        
+                        # Draw text directly with clipping
+                        text_lines = text_content.split('\n')[:max_lines]
+                        for line_idx, line in enumerate(text_lines):
+                            y_pos = frame_y_pdf + scaled_bbox_height - (line_idx + 1) * line_height
+                            # Only draw if visible on page
+                            if y_pos > frame_y_pdf:
+                                # Truncate line if too long
+                                drawn_text = line
+                                if doc_canvas.stringWidth(drawn_text, text_style.fontName, text_style.fontSize) > available_width_for_text:
+                                    # Find where to cut the text
+                                    char_limit = int(len(drawn_text) * available_width_for_text / 
+                                                    doc_canvas.stringWidth(drawn_text, text_style.fontName, text_style.fontSize))
+                                    if char_limit > 3:  # Only truncate if we can show something meaningful
+                                        drawn_text = drawn_text[:char_limit-3] + "..."
+                                
+                                doc_canvas.drawString(frame_x_pdf + frame_left_padding, y_pos + frame_bottom_padding, drawn_text)
+                        
+                        doc_canvas.restoreState()
+                        success = True  # Mark as success since we've done our best
+                        
+                        if current_attempt == max_attempts - 1:
+                            print(f"Размещен текст для элемента {i} с минимальным размером шрифта {text_style.fontSize}")
+                
+            except Exception as frame_error:
+                # Final attempt failed
+                print(f"ОШИБКА при размещении текста для элемента {i}: {frame_error}")
+                if debug_draw_bbox_borders:
+                    doc_canvas.saveState()
+                    doc_canvas.setStrokeColor(red)
+                    doc_canvas.setFillColor(red)
+                    doc_canvas.setStrokeAlpha(0.7)
+                    doc_canvas.setFillAlpha(0.1)
+                    doc_canvas.rect(frame_x_pdf, frame_y_pdf, scaled_bbox_width, scaled_bbox_height, fill=1, stroke=1)
+                    doc_canvas.restoreState()
+                break
+                
+        # If no success after all attempts and debug is enabled, draw error indicator
+        if not success and debug_draw_bbox_borders:
+            doc_canvas.saveState()
+            doc_canvas.setStrokeColor(purple)  # Используем фиолетовый для обозначения полного провала размещения
+            doc_canvas.setDash(2, 4)
+            doc_canvas.rect(frame_x_pdf, frame_y_pdf, scaled_bbox_width, scaled_bbox_height)
+            doc_canvas.restoreState()
 
     doc_canvas.save()
     print(f"PDF файл '{output_pdf_filename}' успешно сгенерирован.")
